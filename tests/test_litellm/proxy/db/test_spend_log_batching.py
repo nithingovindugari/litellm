@@ -61,6 +61,19 @@ def test_a_row_larger_than_the_budget_is_written_alone_not_dropped() -> None:
     ]
 
 
+def test_an_unserializable_value_does_not_break_the_flush() -> None:
+    """Measuring a row must never be what loses spend data. A value the
+    serializer refuses (a self-referencing list is the reachable case) counts
+    as zero and the row is still written, rather than raising out of the
+    flush and dropping every row queued behind it."""
+    circular: List[Any] = []
+    circular.append(circular)
+    row = {"request_id": "r", "messages": circular}
+
+    assert _row_payload_bytes(row) == len(json.dumps("r"))
+    assert [[r["request_id"] for r in batch] for batch in spend_log_write_batches([row], max_bytes=10)] == [["r"]]
+
+
 def test_empty_input_yields_no_statements() -> None:
     assert list(spend_log_write_batches([], max_bytes=1000)) == []
 
