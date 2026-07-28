@@ -9,11 +9,13 @@ Symbols pinned here:
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import litellm.proxy.utils as utils_mod
 from litellm.proxy.utils import ProxyUpdateSpend
 
 
@@ -166,6 +168,40 @@ async def test_update_spend_logs_writes_batches_via_create_many(
         "skip_duplicates": True,
         "first_request_id": "r0",
     }
+
+
+@pytest.mark.asyncio
+async def test_update_spend_logs_bounds_each_statement_by_payload_bytes(
+    mock_prisma_client: Any, make_spend_log_row: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flush of prompt-carrying rows must reach Prisma as several small
+    statements rather than one huge one: the query engine's resident memory is
+    a high-water mark set by the largest statement it ever executes, and it
+    never returns that memory to the OS."""
+    monkeypatch.setattr(utils_mod, "SPEND_LOG_WRITE_BATCH_MAX_BYTES", 50_000)
+    blob = json.dumps({"content": "x" * 10_000})
+    logs = [make_spend_log_row(request_id=f"r{i}", messages=blob, response=blob) for i in range(50)]
+    mock_prisma_client.db.litellm_spendlogs.create_many = AsyncMock()
+    proxy_logging = MagicMock()
+    proxy_logging.failure_handler = AsyncMock()
+
+    await ProxyUpdateSpend.update_spend_logs(
+        n_retry_times=0,
+        prisma_client=mock_prisma_client,
+        db_writer_client=None,
+        proxy_logging_obj=proxy_logging,
+        logs_to_process=logs,
+    )
+
+    calls = mock_prisma_client.db.litellm_spendlogs.create_many.await_args_list
+    written = [row["request_id"] for call in calls for row in call.kwargs["data"]]
+    largest_statement_bytes = max(
+        sum(len(value) for row in call.kwargs["data"] for value in row.values() if isinstance(value, str))
+        for call in calls
+    )
+    assert written == [f"r{i}" for i in range(50)]
+    assert [len(call.kwargs["data"]) for call in calls] == [2] * 25
+    assert largest_statement_bytes <= 50_000
 
 
 @pytest.mark.asyncio

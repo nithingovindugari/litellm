@@ -38,6 +38,7 @@ from litellm.constants import (
     DEFAULT_MODEL_CREATED_AT_TIME,
     LITELLM_LOGGING_NO_UPSTREAM_LLM_CALL,
     MAX_TEAM_LIST_LIMIT,
+    SPEND_LOG_WRITE_BATCH_MAX_BYTES,
 )
 from litellm.proxy._types import (
     DB_CONNECTION_ERROR_TYPES,
@@ -134,6 +135,7 @@ from litellm.proxy.db.prisma_client import (
     parse_iam_endpoint_from_url,
 )
 from litellm.proxy.db.routing_prisma_wrapper import RoutingPrismaWrapper
+from litellm.proxy.db.spend_log_batching import spend_log_write_batches
 from litellm.proxy.guardrails.guardrail_hooks.unified_guardrail.unified_guardrail import (
     UnifiedLLMGuardrails,
 )
@@ -5394,11 +5396,14 @@ class ProxyUpdateSpend:
                         for j in range(0, len(logs_to_process), BATCH_SIZE):
                             batch = logs_to_process[j : j + BATCH_SIZE]
                             batch_with_dates = [prisma_client.jsonify_object({**entry}) for entry in batch]
-                            await _create_spend_logs_with_poison_isolation(
-                                SpendLogsRepository(prisma_client),
-                                batch_with_dates,
-                                MAX_SPEND_LOG_ISOLATION_ATTEMPTS_PER_BATCH,
-                            )
+                            for statement_rows in spend_log_write_batches(
+                                batch_with_dates, SPEND_LOG_WRITE_BATCH_MAX_BYTES
+                            ):
+                                await _create_spend_logs_with_poison_isolation(
+                                    SpendLogsRepository(prisma_client),
+                                    statement_rows,
+                                    MAX_SPEND_LOG_ISOLATION_ATTEMPTS_PER_BATCH,
+                                )
                             verbose_proxy_logger.debug(f"Flushed {len(batch)} logs to the DB.")
                             # Explicitly clear batch memory
                             del batch, batch_with_dates
