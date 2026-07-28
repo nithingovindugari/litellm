@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import litellm.proxy.utils as utils_mod
+from litellm.proxy.db.spend_log_batching import _row_payload_bytes
 from litellm.proxy.utils import ProxyUpdateSpend
 
 
@@ -195,10 +196,9 @@ async def test_update_spend_logs_bounds_each_statement_by_payload_bytes(
 
     calls = mock_prisma_client.db.litellm_spendlogs.create_many.await_args_list
     written = [row["request_id"] for call in calls for row in call.kwargs["data"]]
-    largest_statement_bytes = max(
-        sum(len(value) for row in call.kwargs["data"] for value in row.values() if isinstance(value, str))
-        for call in calls
-    )
+    # Measured the way the flush measures, so the assertion tracks the budget
+    # that is actually enforced rather than a looser restatement of it.
+    largest_statement_bytes = max(sum(_row_payload_bytes(row) for row in call.kwargs["data"]) for call in calls)
     assert written == [f"r{i}" for i in range(50)]
     assert [len(call.kwargs["data"]) for call in calls] == [2] * 25
     assert largest_statement_bytes <= 50_000

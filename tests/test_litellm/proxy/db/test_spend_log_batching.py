@@ -61,6 +61,21 @@ def test_a_row_larger_than_the_budget_is_written_alone_not_dropped() -> None:
     ]
 
 
+def test_field_names_and_separators_are_counted() -> None:
+    """A spend-log row carries ~25 columns, so for rows of many small values
+    the field names and separators outweigh the values themselves. Counting
+    only the values would let such a statement run well past the budget."""
+    row = {f"column_with_a_long_name_{i}": "v" for i in range(25)}
+    value_bytes_only = sum(len(json.dumps(value)) for value in row.values())
+
+    assert _row_payload_bytes(row) > 4 * value_bytes_only
+
+    # Every row fits the budget counting values alone, and only two fit once
+    # the keys are counted, so the split is what proves they are counted.
+    budget = 3 * _row_payload_bytes(row)
+    assert [len(batch) for batch in spend_log_write_batches([row] * 6, max_bytes=budget)] == [3, 3]
+
+
 def test_an_unserializable_value_does_not_break_the_flush() -> None:
     """Measuring a row must never be what loses spend data. A value the
     serializer refuses (a self-referencing list is the reachable case) counts
@@ -70,7 +85,7 @@ def test_an_unserializable_value_does_not_break_the_flush() -> None:
     circular.append(circular)
     row = {"request_id": "r", "messages": circular}
 
-    assert _row_payload_bytes(row) == len(json.dumps("r"))
+    assert _row_payload_bytes(row) == 0
     assert [[r["request_id"] for r in batch] for batch in spend_log_write_batches([row], max_bytes=10)] == [["r"]]
 
 

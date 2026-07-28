@@ -22,35 +22,34 @@ from collections.abc import Iterator, Mapping, Sequence
 SpendLogRow = Mapping[str, object]
 
 
-def _value_payload_bytes(value: object) -> int:
-    """Bytes ``value`` contributes to the encoded write statement.
-
-    Values are measured as they will be encoded rather than as they are held
-    in memory, because the two differ by enough to defeat the budget. Counting
-    characters under-measures a prompt in a non-Latin script by its
-    bytes-per-character factor, and even an all-ASCII prompt grows when JSON
-    escapes its quotes, backslashes and newlines (about 18% for a realistic
-    stored prompt, and up to double for escape-dense content). Serializing
-    settles both: ``json.dumps`` escapes non-ASCII to ``\\uXXXX`` and defaults
-    to ASCII output, so the length it reports is a byte count that never
-    under-states the wire size.
-
-    Rows arrive after ``jsonify_object``, which converts dicts to strings but
-    leaves lists alone, and ``messages`` / ``response`` are typed to allow a
-    list, so both shapes are measured the same way here. Scalars are
-    negligible next to the blobs and are not counted.
-    """
-    if isinstance(value, (str, list, tuple, dict)):
-        try:
-            return len(json.dumps(value, default=str))
-        except (TypeError, ValueError):
-            return 0
-    return 0
-
-
 def _row_payload_bytes(row: SpendLogRow) -> int:
-    """Approximate the bytes this row contributes to the write statement."""
-    return sum(_value_payload_bytes(value) for value in row.values())
+    """Bytes this row contributes to the encoded write statement.
+
+    The whole row is serialized rather than its values summed, so the count
+    includes the field names, separators and braces the row carries on the
+    wire and not only its payload. Those are what make the difference between
+    a measurement and an estimate for a row of many small columns, where the
+    keys outweigh the values.
+
+    Serializing is also what makes the count a byte count. Character counts
+    under-measure a prompt in a non-Latin script by its bytes-per-character
+    factor, and even an all-ASCII prompt grows when JSON escapes its quotes,
+    backslashes and newlines (about 18% for a realistic stored prompt, and up
+    to double for escape-dense content). ``json.dumps`` escapes non-ASCII to
+    ``\\uXXXX`` and defaults to ASCII output, so its length never under-states
+    the wire size. ``default=str`` covers the datetimes and other scalars a
+    row carries.
+
+    A row the serializer refuses (a self-reference is the reachable case)
+    counts as zero rather than raising: measuring a row must never be what
+    loses spend data, since raising here would propagate out of the flush and
+    drop every row queued behind it. Such a row is still written, it just does
+    not contribute to the budget.
+    """
+    try:
+        return len(json.dumps(row, default=str))
+    except (TypeError, ValueError):
+        return 0
 
 
 def spend_log_write_batches(
